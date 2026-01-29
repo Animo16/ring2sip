@@ -22,7 +22,7 @@ class Tones {
         if (this.isSipReady) {
           this.sip.sendAudioPacket(rtpPacket, true);
         }
-        if (this.isRingReady && this.isSipRinging) {
+        if (this.isRingReady) {
           this.ring.sendAudioPacket(rtpPacket, true);
         }
       }

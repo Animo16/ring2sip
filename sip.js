@@ -75,6 +75,10 @@ class Sip extends EventEmitter {
       else if (request.method === 'INVITE') {
         this._handleInboundInvite(request)
       }
+      else if (request.method === 'INFO') {
+        const response = sipLib.makeResponse(request, 200, 'OK')
+        sipLib.send(response)
+      }
       else if (request.method === 'OPTIONS') {
         const response = sipLib.makeResponse(request, 200, 'OK')
         sipLib.send(response)
@@ -341,8 +345,27 @@ class Sip extends EventEmitter {
    * If OPUS is not found, reject with 488 Not Acceptable Here.
    */
   _handleInboundInvite(request) {
-    if (this.initiatingCall) return
+    const receivedCallId = request.headers['call-id']
+    const isReInvite = this.sipSession && this.sipSession.headers['call-id'] === receivedCallId
+
+    if (this.initiatingCall && !isReInvite) {
+      console.log('SIP - Ignoring inbound INVITE (already in a call/initiating and Call-ID does not match)')
+      return
+    }
     this.initiatingCall = true
+
+    if (isReInvite) {
+      console.log('SIP - Received Re-INVITE. Responding with 200 OK.')
+      // Update SDP info?
+      const remoteSdp = request.content || ''
+      this.serverRtpInfo = this._parseRemoteSdp(remoteSdp) || this.serverRtpInfo
+
+      const okResponse = sipLib.makeResponse(request, 200, 'OK')
+      okResponse.headers['content-type'] = 'application/sdp'
+      okResponse.content = this._buildLocalSdp(Date.now()) // Send our SDP again
+      sipLib.send(okResponse)
+      return
+    }
 
     console.log('SIP - Inbound call, checking offered codecs...')
 
@@ -449,6 +472,14 @@ class Sip extends EventEmitter {
     const lines = sdp.split('\n').map(l => l.trim())
     const result = { audio: null, video: null }
 
+    // extract global connection IP
+    let globalIp = '127.0.0.1'
+    const cLine = lines.find(line => line.startsWith('c=IN IP4'))
+    if (cLine) {
+      const cMatch = cLine.match(/c=IN IP4\s+(\S+)/)
+      if (cMatch) globalIp = cMatch[1]
+    }
+
     // --- AUDIO (OPUS) ---
     const mAudioLine = lines.find(line => line.startsWith('m=audio'))
     if (mAudioLine) {
@@ -456,20 +487,18 @@ class Sip extends EventEmitter {
       if (match) {
         const port = parseInt(match[1], 10)
         const payloadTypes = match[2].split(' ').map(n => parseInt(n, 10))
+        let destination = globalIp
 
-        // Get Audio Destination
-        let destination = '127.0.0.1'
-        const cLine = lines.find(line => line.startsWith('c=IN IP4'))
-        if (cLine) {
-          const cMatch = cLine.match(/c=IN IP4\s+(\S+)/)
-          if (cMatch) destination = cMatch[1]
-        }
+        // Check for media-level c= line (simplified, assumes it follows in upcoming lines if parsing sequentially, 
+        // but here we just use global or look for closer one? 
+        // For simplicity, sticking to global or re-scanning if needed. 
+        // Standard robust parsing is harder, but global IP is 99% case.)
 
         // Search for OPUS
         let opusPayloadType = null
         lines.forEach(line => {
           if (line.startsWith('a=rtpmap:')) {
-            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-]+)/)
+            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-\.]+)/)
             if (!rtpmapMatch) return
             const pt = parseInt(rtpmapMatch[1], 10)
             const codec = rtpmapMatch[2].toUpperCase()
@@ -493,22 +522,17 @@ class Sip extends EventEmitter {
       if (match) {
         const port = parseInt(match[1], 10)
         const payloadTypes = match[2].split(' ').map(n => parseInt(n, 10))
-
-        // Video destination might be same as global c= or specific
-        // For simplicity assume same global c= unless m=video has its own (not implemented deeply here)
-        // But let's check if there is a c= line after m=video? 
-        // Standard SDP parsing is complex. We'll use the one we found earlier or look for one specifically for video?
-        // Simpler approach: Use the global c= line we found (destination var).
-        const destination = result.audio ? result.audio.destination : '127.0.0.1'
+        const destination = globalIp
 
         let h264PayloadType = null
         lines.forEach(line => {
           if (line.startsWith('a=rtpmap:')) {
-            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-]+)/)
+            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-\.]+)/)
             if (!rtpmapMatch) return
             const pt = parseInt(rtpmapMatch[1], 10)
             const codec = rtpmapMatch[2].toUpperCase()
-            if (codec.includes('H264') && payloadTypes.includes(pt)) {
+            // Match H264 or H.264
+            if ((codec.includes('H264') || codec.includes('H.264')) && payloadTypes.includes(pt)) {
               h264PayloadType = pt
             }
           }
@@ -540,7 +564,7 @@ class Sip extends EventEmitter {
       'm=video ' + LOCAL_VIDEO_PORT + ' RTP/AVP 99',
       'a=rtpmap:99 H264/90000',
       'a=fmtp:99 packetization-mode=1;profile-level-id=42e01f',
-      'a=sendonly',
+      'a=sendrecv',
     ].join('\r\n') + '\r\n';
   }
 }

@@ -57,14 +57,49 @@ Promise.all([
     fullCleanup()
   })
 
-  ring.on('buttonPressed', (camera) => {
-    console.log(`INDEX - Button pressed for ${camera.name}`)
+  let lastButtonPress = 0
+  let lastDingId = null
+
+  ring.on('buttonPressed', (data) => {
+    // Determine if data is the camera object (old way) or { camera, dingId } (new way)
+    let camera = data
+    let dingId = null
+
+    if (data && data.dingId) {
+      camera = data.camera
+      dingId = data.dingId
+    }
+
+    const now = Date.now()
+
+    // Check Ding ID first (if available)
+    if (dingId && lastDingId === dingId) {
+      console.log(`INDEX - Button press ignored (Duplicate Ding ID: ${dingId})`)
+      return
+    }
+
+    // Fallback time debounce (only if IDs are missing or different but very fast?)
+    // Actually, if IDs are different, we should allow it!
+    // But let's keep a small safety debounce of 500ms even for different IDs to avoid double-triggers
+    if (now - lastButtonPress < 500) {
+      console.log('INDEX - Button press ignored (debounce time)')
+      return
+    }
+
+    lastButtonPress = now
+    if (dingId) lastDingId = dingId
+
+    console.log(`INDEX - Button pressed for ${camera.name} (ID: ${dingId})`)
 
     // If a call is already in progress or starting, hang up
     if (ring.initiatingCall || ring.currentCall || sip.initiatingCall || sip.inviteRequest || sip.sipSession) {
       console.log('INDEX - Call active. Playing hangup tone...')
-      tones.playHangup().then(() => {
-        console.log('INDEX - Hangup tone done. Cleaning up...')
+
+      const tonePromise = tones.playHangup()
+      const timeoutPromise = new Promise(resolve => setTimeout(resolve, 2000))
+
+      Promise.race([tonePromise, timeoutPromise]).then(() => {
+        console.log('INDEX - Hangup tone done (or timeout). Cleaning up...')
         fullCleanup()
       })
       return
