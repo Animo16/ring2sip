@@ -64,6 +64,57 @@ class Tones {
     }
   }
 
+  playHangup() {
+    return new Promise((resolve) => {
+      // Stop existing process if any
+      if (this.ffmpegProcess) {
+        this.ffmpegProcess.stop();
+        this.ffmpegProcess = null;
+      }
+
+      const port = this.getPort();
+      const HANGUP_FILE = process.env.HANGUP_FILE;
+      let ffmpegArgs = [];
+
+      if (HANGUP_FILE) {
+        ffmpegArgs = [
+          '-hide_banner',
+          '-protocol_whitelist', 'file,udp,rtp,crypto',
+          '-re',
+          '-i', HANGUP_FILE,
+          '-acodec', 'libopus',
+          '-ac', '2',
+          '-ar', '48k',
+          '-flags', '+global_header',
+          '-f', 'rtp',
+          `rtp://127.0.0.1:${port}`,
+        ];
+      } else {
+        ffmpegArgs = [
+          '-hide_banner',
+          '-re',
+          '-f', 'lavfi',
+          '-i', 'sine=frequency=425:duration=1',
+          '-acodec', 'libopus',
+          '-ac', '2',
+          '-ar', '48k',
+          '-f', 'rtp',
+          `rtp://127.0.0.1:${port}`,
+        ];
+      }
+
+      console.log(`TONES - Spawning FFmpeg process for hangup tone`);
+      this.ffmpegProcess = new FfmpegProcess({
+        ffmpegArgs,
+        exitCallback: () => {
+          console.log('TONES - Hangup tone finished');
+          this.ffmpegProcess = null;
+          resolve();
+        }
+      });
+    });
+  }
+
   initialize(sip, ring) {
     this.sip = sip;
     this.ring = ring;
@@ -84,7 +135,7 @@ class Tones {
     console.log('TONES - Notified that SIP is ringing');
     this.isSipRinging = true;
   }
-  
+
   ringReady() {
     console.log('TONES - Notified that RING is ready');
     this.isRingReady = true;

@@ -1,7 +1,7 @@
 import { RingApi } from 'ring-client-api'
 import { EventEmitter } from 'events'
 import { getRefreshTokenFromEnv, updateRefreshTokenInEnv } from './util.js'
-import RtpSequencer  from './rtp-sequencer.js'
+import RtpSequencer from './rtp-sequencer.js'
 
 const {
   CAMERA_NAME
@@ -28,18 +28,18 @@ class Ring extends EventEmitter {
       console.log('RING - Refresh token updated')
       updateRefreshTokenInEnv(newRefreshToken)
     })
-    
+
     return this.ringApi.getCameras().then((cameras) => {
-        if (!cameras.length) {
-          return reject(new Error('No cameras found in the location.'))
+      if (!cameras.length) {
+        return reject(new Error('No cameras found in the location.'))
+      }
+
+      for (let camera of cameras) {
+        if (camera.isDoorbot && camera.name == CAMERA_NAME) {
+          this.camera = camera
+          console.log(`Attaching button listener to ${camera.name}`)
         }
-        
-        for (let camera of cameras) {
-            if (camera.isDoorbot && camera.name == CAMERA_NAME) {
-                this.camera = camera
-                console.log(`Attaching button listener to ${camera.name}`)
-            }
-        }
+      }
     })
   }
 
@@ -47,7 +47,7 @@ class Ring extends EventEmitter {
   initiateCall() {
     if (this.initiatingCall) return
     this.initiatingCall = true
-    
+
     return new Promise(async (resolve, reject) => {
       if (!this.ringApi) {
         return reject(new Error('Ring not initialized. Call initialize() first!'))
@@ -72,7 +72,7 @@ class Ring extends EventEmitter {
 
         // Start playing ringback for demonstration
         call.activateCameraSpeaker()
-        
+
         // Listen for audio RTP
         call.connection.onAudioRtp.subscribe((rtpPacket) => {
           if (!this.receivingAudio) {
@@ -84,6 +84,13 @@ class Ring extends EventEmitter {
           }
         })
 
+        // Listen for video RTP
+        call.connection.onVideoRtp.subscribe((rtpPacket) => {
+          if (this.sip) {
+            this.sip.sendVideoPacket(rtpPacket)
+          }
+        })
+
         // We’ve initiated the call
         resolve()
       } catch (err) {
@@ -92,14 +99,14 @@ class Ring extends EventEmitter {
       }
     })
   }
-  
+
   listen() {
     this.camera.onDoorbellPressed.subscribe(() => {
       console.log(`RING - Button pressed`)
       this.emit('buttonPressed', this.camera)
     });
   }
-  
+
   sendAudioPacket(rtp, isTone = false) {
     // If we haven't configured a destination, do nothing
     if (!this.currentCall) return
@@ -110,7 +117,7 @@ class Ring extends EventEmitter {
 
     this.currentCall.sendAudioPacket(rtp)
   }
-  
+
   pipeAudio(sip) {
     this.sip = sip
   }

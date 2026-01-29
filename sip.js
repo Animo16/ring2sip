@@ -3,7 +3,7 @@ import digest from 'sip/digest.js'
 import { RtpPacket } from 'werift'
 import { EventEmitter } from 'events'
 import { createSocket } from "dgram";
-import RtpSequencer  from './rtp-sequencer.js'
+import RtpSequencer from './rtp-sequencer.js'
 
 const {
   SIP_DOMAIN,
@@ -15,6 +15,8 @@ const {
   LOCAL_RTP_PORT,
   LOCAL_SIP_PORT
 } = process.env
+
+const LOCAL_VIDEO_PORT = parseInt(LOCAL_RTP_PORT) + 2
 
 function rstring() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -36,7 +38,11 @@ class Sip extends EventEmitter {
     this.serverRtpInfo = null
     this.udp = createSocket('udp4');
     this.udp.bind(LOCAL_RTP_PORT, LOCAL_IP, () => {
-      console.log(`SIP - RTP Socket bound to ${LOCAL_IP}:${LOCAL_RTP_PORT}`);
+      console.log(`SIP - Audio RTP Socket bound to ${LOCAL_IP}:${LOCAL_RTP_PORT}`);
+    })
+    this.udpVideo = createSocket('udp4');
+    this.udpVideo.bind(LOCAL_VIDEO_PORT, LOCAL_IP, () => {
+      console.log(`SIP - Video RTP Socket bound to ${LOCAL_IP}:${LOCAL_VIDEO_PORT}`);
     })
     this.rtpSequencer = new RtpSequencer()
 
@@ -56,9 +62,9 @@ class Sip extends EventEmitter {
       address: LOCAL_IP,
       port: LOCAL_SIP_PORT,
       logger: debug ? {
-        send: function(m, target) { console.log('send', m) },
-        recv: function(m, target) { console.log('recv', m) },
-        error: function(e) { console.log('error', e) }
+        send: function (m, target) { console.log('send', m) },
+        recv: function (m, target) { console.log('recv', m) },
+        error: function (e) { console.log('error', e) }
       } : null
     }, (request) => {
       console.log(`SIP - Received request: ${request.method}`)
@@ -76,7 +82,7 @@ class Sip extends EventEmitter {
     })
 
     this.isSipStackStarted = true
-    
+
     return Promise.resolve()
   }
 
@@ -112,11 +118,11 @@ class Sip extends EventEmitter {
       sipLib.send(registerRequest, (response) => {
         if (response.status === 401 && response.headers['www-authenticate']) {
           this._retryWithDigestAuth(
-            registerRequest, 
+            registerRequest,
             response,
             'SIP - REGISTER success (after auth).',
             'SIP - REGISTER failed:',
-            () => {}
+            () => { }
           )
         }
         else if (response.status >= 200 && response.status < 300) {
@@ -140,9 +146,9 @@ class Sip extends EventEmitter {
   initiateCall() {
     if (this.initiatingCall) return
     this.initiatingCall = true
-    
+
     console.log(`SIP - Initiating call to extension ${SIP_DEST} on ${SIP_DOMAIN}...`)
-    
+
     const sessionId = Date.now()
     this.inviteRequest = {
       method: 'INVITE',
@@ -173,18 +179,18 @@ class Sip extends EventEmitter {
       console.log('SIP - Sending BYE to terminate call...')
       const response = this.sipSession
       const request = {
-          method: 'BYE',
-          uri: response.headers.contact[0].uri,
-          headers: {
-            to: response.headers.to,
-            from: response.headers.from,
-            'call-id': response.headers['call-id'],
-            cseq: { method: 'BYE', seq: response.headers.cseq.seq + 1 },
-            via: response.headers.via
-          }
+        method: 'BYE',
+        uri: response.headers.contact[0].uri,
+        headers: {
+          to: response.headers.to,
+          from: response.headers.from,
+          'call-id': response.headers['call-id'],
+          cseq: { method: 'BYE', seq: response.headers.cseq.seq + 1 },
+          via: response.headers.via
+        }
       }
       sipLib.send(request)
-    } 
+    }
     // If we have an INVITE in progress, send CANCEL
     else if (this.inviteRequest) {
       console.log('SIP - Sending CANCEL to terminate call...')
@@ -238,7 +244,7 @@ class Sip extends EventEmitter {
               response,
               'SIP - Unregister success (after auth).',
               'SIP - Unregister failed:',
-              () => {}
+              () => { }
             )
           } else if (response.status >= 200 && response.status < 300) {
             console.log('SIP - Unregister success.')
@@ -256,6 +262,10 @@ class Sip extends EventEmitter {
       this.udp.close()
       this.udp = null
     }
+    if (this.udpVideo) {
+      this.udpVideo.close()
+      this.udpVideo = null
+    }
     this.sipSession = null
     this.inviteRequest = null
   }
@@ -268,14 +278,22 @@ class Sip extends EventEmitter {
   }
 
   sendAudioPacket(rtp, isTone = false) {
-    if (!this.serverRtpInfo) return
+    if (!this.serverRtpInfo || !this.serverRtpInfo.audio) return
 
     // Use RtpSequencer to decide if we drop or forward
     const shouldForward = this.rtpSequencer.process(rtp, isTone)
     if (!shouldForward) return
 
-    rtp.header.payloadType = this.serverRtpInfo.payloadType
-    this.udp.send(rtp.serialize(), this.serverRtpInfo.port, this.serverRtpInfo.destination)
+    rtp.header.payloadType = this.serverRtpInfo.audio.payloadType
+    this.udp.send(rtp.serialize(), this.serverRtpInfo.audio.port, this.serverRtpInfo.audio.destination)
+  }
+
+  sendVideoPacket(rtp) {
+    if (!this.serverRtpInfo || !this.serverRtpInfo.video) return
+
+    rtp.header.payloadType = this.serverRtpInfo.video.payloadType
+    // Video doesn't use the sequencer logic usually, just forward
+    this.udpVideo.send(rtp.serialize(), this.serverRtpInfo.video.port, this.serverRtpInfo.video.destination)
   }
 
   //--------------------------------------------------------------------------
@@ -306,7 +324,7 @@ class Sip extends EventEmitter {
   _handleBye(request) {
     const ourCallId = this.sipSession?.headers['call-id']
     const receivedCallId = request.headers['call-id']
-    
+
     sipLib.send(sipLib.makeResponse(request, 200, 'OK'))
 
     if (ourCallId && receivedCallId && ourCallId === receivedCallId) {
@@ -325,7 +343,7 @@ class Sip extends EventEmitter {
   _handleInboundInvite(request) {
     if (this.initiatingCall) return
     this.initiatingCall = true
-    
+
     console.log('SIP - Inbound call, checking offered codecs...')
 
     // Keep track of this call to handle BYE properly
@@ -333,9 +351,9 @@ class Sip extends EventEmitter {
 
     // Parse the remote SDP
     const remoteSdp = request.content || ''
-    const remoteInfo = this._parseSdpForOpus(remoteSdp)
-    
-    if (!remoteInfo) {
+    const remoteInfo = this._parseRemoteSdp(remoteSdp)
+
+    if (!remoteInfo || !remoteInfo.audio) {
       // No OPUS found, reject
       console.log('SIP - Remote did not offer OPUS. Rejecting call.')
       const response = sipLib.makeResponse(request, 488, 'Not Acceptable Here')
@@ -348,7 +366,7 @@ class Sip extends EventEmitter {
 
     // Send 100 Trying
     sipLib.send(sipLib.makeResponse(request, 100, 'Trying'))
-    
+
     this.emit('inboundCall')
 
     // Optional: Send 180 Ringing if you want to simulate "ringing"
@@ -363,7 +381,7 @@ class Sip extends EventEmitter {
     okResponse.content = this._buildLocalSdp(sessionId)
 
     sipLib.send(okResponse)
-    
+
     this.sipSession = okResponse
 
     // The inbound call is now "established" from our perspective
@@ -397,7 +415,7 @@ class Sip extends EventEmitter {
       this.sipSession = response
 
       // Parse SDP from the response
-      this.serverRtpInfo = this._parseSdpForOpus(response.content)
+      this.serverRtpInfo = this._parseRemoteSdp(response.content)
 
       // Send ACK
       sipLib.send({
@@ -414,7 +432,7 @@ class Sip extends EventEmitter {
 
       // Let others know we've established the call
       this.emit('callEstablished', this.serverRtpInfo)
-    } 
+    }
     else {
       console.error(`SIP - Call failed: ${response.status} ${response.reason}`, response)
       this.inviteRequest = null
@@ -423,67 +441,87 @@ class Sip extends EventEmitter {
   }
 
   /**
-   * Parse the remote SDP, find if OPUS is offered, and return
-   * the destination/port/payloadType for OPUS. If not found, return null.
+   * Parse the remote SDP, find if OPUS/H264 is offered.
    */
-  _parseSdpForOpus(sdp) {
+  _parseRemoteSdp(sdp) {
     if (!sdp) return null
 
     const lines = sdp.split('\n').map(l => l.trim())
-    
-    // Find "m=audio" line
-    const mLine = lines.find(line => line.startsWith('m=audio'))
-    if (!mLine) {
-      return null
-    }
+    const result = { audio: null, video: null }
 
-    // Example: m=audio 49170 RTP/AVP 0 96 97
-    const mMatch = mLine.match(/m=audio\s+(\d+)\s+RTP\/\S+\s+(.+)/)
-    if (!mMatch) return null
-    
-    const port = parseInt(mMatch[1], 10)
-    // All listed payload types (e.g. "0 96 97")
-    const payloadTypesInM = mMatch[2]
-      .split(' ')
-      .map(num => parseInt(num, 10))
-      .filter(n => !isNaN(n))
+    // --- AUDIO (OPUS) ---
+    const mAudioLine = lines.find(line => line.startsWith('m=audio'))
+    if (mAudioLine) {
+      const match = mAudioLine.match(/m=audio\s+(\d+)\s+RTP\/\S+\s+(.+)/)
+      if (match) {
+        const port = parseInt(match[1], 10)
+        const payloadTypes = match[2].split(' ').map(n => parseInt(n, 10))
 
-    // c=IN IP4 x.x.x.x
-    let destination = '127.0.0.1'
-    const cLine = lines.find(line => line.startsWith('c=IN IP4'))
-    if (cLine) {
-      const cMatch = cLine.match(/c=IN IP4\s+(\S+)/)
-      if (cMatch) {
-        destination = cMatch[1]
-      }
-    }
+        // Get Audio Destination
+        let destination = '127.0.0.1'
+        const cLine = lines.find(line => line.startsWith('c=IN IP4'))
+        if (cLine) {
+          const cMatch = cLine.match(/c=IN IP4\s+(\S+)/)
+          if (cMatch) destination = cMatch[1]
+        }
 
-    // We need to find an a=rtpmap line that references OPUS and also
-    // confirm that payload type is in the m=audio line above.
-    let opusPayloadType = null
-    
-    lines.forEach(line => {
-      // Example: a=rtpmap:96 OPUS/48000/2
-      if (line.startsWith('a=rtpmap:')) {
-        const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-]+)/)
-        if (!rtpmapMatch) return
-        
-        const pt = parseInt(rtpmapMatch[1], 10)
-        const codec = rtpmapMatch[2].toUpperCase() // OPUS, PCMU, G729, etc.
-        
-        if (codec === 'OPUS' && payloadTypesInM.includes(pt)) {
-          opusPayloadType = pt
+        // Search for OPUS
+        let opusPayloadType = null
+        lines.forEach(line => {
+          if (line.startsWith('a=rtpmap:')) {
+            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-]+)/)
+            if (!rtpmapMatch) return
+            const pt = parseInt(rtpmapMatch[1], 10)
+            const codec = rtpmapMatch[2].toUpperCase()
+            if (codec.includes('OPUS') && payloadTypes.includes(pt)) {
+              opusPayloadType = pt
+            }
+          }
+        })
+
+        if (opusPayloadType) {
+          console.log(`SIP - Found Remote Audio: ${destination}:${port} PT=${opusPayloadType}`)
+          result.audio = { destination, port, payloadType: opusPayloadType }
         }
       }
-    })
-
-    if (!opusPayloadType) {
-      // No OPUS offered
-      return null
     }
 
-    console.log(`SIP - Parsed SDP (OPUS found). destination=${destination}, port=${port}, opusPayload=${opusPayloadType}`)
-    return { destination, port, payloadType: opusPayloadType }
+    // --- VIDEO (H264) ---
+    const mVideoLine = lines.find(line => line.startsWith('m=video'))
+    if (mVideoLine) {
+      const match = mVideoLine.match(/m=video\s+(\d+)\s+RTP\/\S+\s+(.+)/)
+      if (match) {
+        const port = parseInt(match[1], 10)
+        const payloadTypes = match[2].split(' ').map(n => parseInt(n, 10))
+
+        // Video destination might be same as global c= or specific
+        // For simplicity assume same global c= unless m=video has its own (not implemented deeply here)
+        // But let's check if there is a c= line after m=video? 
+        // Standard SDP parsing is complex. We'll use the one we found earlier or look for one specifically for video?
+        // Simpler approach: Use the global c= line we found (destination var).
+        const destination = result.audio ? result.audio.destination : '127.0.0.1'
+
+        let h264PayloadType = null
+        lines.forEach(line => {
+          if (line.startsWith('a=rtpmap:')) {
+            const rtpmapMatch = line.match(/a=rtpmap:(\d+)\s+([\w\-]+)/)
+            if (!rtpmapMatch) return
+            const pt = parseInt(rtpmapMatch[1], 10)
+            const codec = rtpmapMatch[2].toUpperCase()
+            if (codec.includes('H264') && payloadTypes.includes(pt)) {
+              h264PayloadType = pt
+            }
+          }
+        })
+
+        if (h264PayloadType) {
+          console.log(`SIP - Found Remote Video: ${destination}:${port} PT=${h264PayloadType}`)
+          result.video = { destination, port, payloadType: h264PayloadType }
+        }
+      }
+    }
+
+    return (result.audio || result.video) ? result : null
   }
 
   _buildLocalSdp(sessionId) {
@@ -499,8 +537,10 @@ class Sip extends EventEmitter {
       'a=ptime:20',
       'a=maxptime:150',
       'a=sendrecv',
-      'm=video 0 RTP/AVP 99',
-      'a=inactive',
+      'm=video ' + LOCAL_VIDEO_PORT + ' RTP/AVP 99',
+      'a=rtpmap:99 H264/90000',
+      'a=fmtp:99 packetization-mode=1;profile-level-id=42e01f',
+      'a=sendonly',
     ].join('\r\n') + '\r\n';
   }
 }

@@ -7,65 +7,76 @@ const { NOTIFY_URL } = process.env;
 
 // Initialize
 Promise.all([
-    sip.initialize(),
-    ring.initialize()
+  sip.initialize(),
+  ring.initialize()
 ]).then(() => {
-    tones.initialize(sip, ring)
-    console.log('INDEX - Initialized.')
+  tones.initialize(sip, ring)
+  console.log('INDEX - Initialized.')
 
-    // Setup event listeners for SIP
-    sip.on('ringing', () => {
-      console.error('INDEX - SIP ringing')
-      // for Ring button initiated all, the ring speaker should not play the ringback tone unless sip is actually ringing
-      tones.sipRinging()
-    })
+  // Setup event listeners for SIP
+  sip.on('ringing', () => {
+    console.error('INDEX - SIP ringing')
+    // for Ring button initiated all, the ring speaker should not play the ringback tone unless sip is actually ringing
+    tones.sipRinging()
+  })
 
-    sip.on('callEstablished', (rtpInfo) => {
-      console.log('INDEX - SIP call established')
-      tones.sipReady()
-      ring.pipeAudio(sip)
-    })
+  sip.on('callEstablished', (rtpInfo) => {
+    console.log('INDEX - SIP call established')
+    tones.sipReady()
+    ring.pipeAudio(sip)
+  })
 
-    sip.on('callFailed', (err) => {
-      console.error('INDEX - SIP call failed:', err)
-      fullCleanup()
-    })
+  sip.on('callFailed', (err) => {
+    console.error('INDEX - SIP call failed:', err)
+    fullCleanup()
+  })
 
-    sip.on('callEnded', () => {
-      console.log('INDEX - SIP call ended. Cleaning up everything.')
-      fullCleanup()
-    })
-    
-    sip.on('inboundCall', () => {
-      console.log('INDEX - Inbound SIP call. Initiating RING call.')
-      ring.initiateCall()
-    })
+  sip.on('callEnded', () => {
+    console.log('INDEX - SIP call ended. Cleaning up everything.')
+    fullCleanup()
+  })
 
-    // Setup event listeners for Ring
-    ring.on('callEstablished', () => {
-      console.log('INDEX - Ring call established')
-      sip.pipeAudio(ring)
-    })
+  sip.on('inboundCall', () => {
+    console.log('INDEX - Inbound SIP call. Initiating RING call.')
+    ring.initiateCall()
+  })
 
-    ring.on('receivingAudio', () => {
-      console.log('INDEX - Receiving audio from Ring')
-      tones.ringReady()
-    })
+  // Setup event listeners for Ring
+  ring.on('callEstablished', () => {
+    console.log('INDEX - Ring call established')
+    sip.pipeAudio(ring)
+  })
 
-    ring.on('callEnded', () => {
-      console.log('INDEX - Ring call ended. Cleaning up everything.')
-      fullCleanup()
-    })
+  ring.on('receivingAudio', () => {
+    console.log('INDEX - Receiving audio from Ring')
+    tones.ringReady()
+  })
 
-    ring.on('buttonPressed', (camera) => {
-      console.log(`INDEX - Button pressed for ${camera.name}`)
-      notify()
-      doConnect()
-    })
+  ring.on('callEnded', () => {
+    console.log('INDEX - Ring call ended. Cleaning up everything.')
+    fullCleanup()
+  })
 
-    sip.register()
-    ring.listen()
-    //doConnect() // for testing purposes
+  ring.on('buttonPressed', (camera) => {
+    console.log(`INDEX - Button pressed for ${camera.name}`)
+
+    // If a call is already in progress or starting, hang up
+    if (ring.initiatingCall || ring.currentCall || sip.initiatingCall || sip.inviteRequest || sip.sipSession) {
+      console.log('INDEX - Call active. Playing hangup tone...')
+      tones.playHangup().then(() => {
+        console.log('INDEX - Hangup tone done. Cleaning up...')
+        fullCleanup()
+      })
+      return
+    }
+
+    notify()
+    doConnect()
+  })
+
+  sip.register()
+  ring.listen()
+  //doConnect() // for testing purposes
 })
 
 process.on('SIGINT', () => {
@@ -85,26 +96,26 @@ function fullCleanup() {
 }
 
 function doConnect(camera) {
-    Promise.all([
-      sip.initiateCall(),
-      ring.initiateCall()
-    ])
-      .then(() => {
-        console.log('INDEX - Both calls initiated in parallel.')
-      })
-      .catch((err) => {
-        console.error('INDEX - Error initiating calls:', err)
-        fullCleanup()
-      })
+  Promise.all([
+    sip.initiateCall(),
+    ring.initiateCall()
+  ])
+    .then(() => {
+      console.log('INDEX - Both calls initiated in parallel.')
+    })
+    .catch((err) => {
+      console.error('INDEX - Error initiating calls:', err)
+      fullCleanup()
+    })
 }
 
 function notify() {
-    if (NOTIFY_URL && NOTIFY_URL.startsWith('http')) {
-      fetch(NOTIFY_URL)
-        .then(response => response.text())
-        .then(data => console.log('INDEX - Notification sent successfully:', data))
-        .catch(error => console.error('INDEX - Error sending notification:', error));
-    } else {
-      console.log('INDEX - NOTIFY_URL is not set or invalid.');
-    }
+  if (NOTIFY_URL && NOTIFY_URL.startsWith('http')) {
+    fetch(NOTIFY_URL)
+      .then(response => response.text())
+      .then(data => console.log('INDEX - Notification sent successfully:', data))
+      .catch(error => console.error('INDEX - Error sending notification:', error));
+  } else {
+    console.log('INDEX - NOTIFY_URL is not set or invalid.');
+  }
 }
